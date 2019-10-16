@@ -1,0 +1,61 @@
+variables:
+  MATTERMOST_VERSION: 1.23.1
+  BUNDLE_CACHE_PATH: $CI_PROJECT_DIR/.bundle-cache
+  APP_NAME: "App Name"
+  PACKAGE_ID: your-package-id
+
+after_script:
+  - rm -f mattermost-mobile-$MATTERMOST_VERSION/android/app/.keystore .config
+
+build_apk:
+  except:
+    - tags
+  cache:
+    paths:
+      - .npmcache
+      - .bundle-cache
+  artifacts:
+    paths:
+      - public
+    expire_in: 1 week
+  script:
+    - docker build --pull -t ruby-node-build -f Dockerfile.build .
+    - curl -L -o mattermost.zip https://github.com/mattermost/mattermost-mobile/archive/v$MATTERMOST_VERSION.zip
+      && unzip mattermost.zip && cd mattermost-mobile-$MATTERMOST_VERSION
+    - cp $CI_PROJECT_DIR/google-services.json android/app
+    - sed -i -e 's/184930218130/your-project-id/' android/app/src/main/AndroidManifest.xml
+    - mkdir assets/override && cp $CI_PROJECT_DIR/config.json assets/override
+    - echo $JAVA_KEYSTORE | base64 -d > android/app/.keystore
+    - mkdir $CI_PROJECT_DIR/.gradle
+      && mv $CI_PROJECT_DIR/gradle.properties $CI_PROJECT_DIR/.gradle
+    - echo "MATTERMOST_RELEASE_PASSWORD=$JAVA_KEYSTORE_PW" >> $CI_PROJECT_DIR/.gradle/gradle.properties
+    - export CONTAINER=`head -n1 /proc/self/cgroup | cut -d '/' -f 3`
+    - mkdir .npmcache
+    - docker run --rm
+      -v /proc:/host/proc
+      --cap-add SYS_ADMIN
+      alpine
+      sh -c "echo 524288 > /host/proc/sys/fs/inotify/max_user_watches && sysctl -p"
+    - docker run --rm --volumes-from="${CONTAINER}"
+      -e NPM_CONFIG_CACHE=$CI_PROJECT_DIR/.npmcache
+      -e BUNDLE_CACHE_PATH
+      -e HOME=$CI_PROJECT_DIR
+      -e APP_NAME
+      -e LC_ALL="en_US.UTF-8" -e LANG="en_US.UTF-8"
+      -e ANDROID_HOME=/opt/android-sdk
+      -e PACKAGE_ID -e SUPPLY_PACKAGE_NAME=$PACKAGE_ID
+      -e MAIN_APP_IDENTIFIER=$PACKAGE_ID
+      -e BUILD_FOR_RELEASE=true
+      -e BUNDLE_BIN=false
+      -e GRADLE_OPTS="-Dorg.gradle.daemon=false"
+      -e JAVA_OPTS="-Xmx3g -XX:MaxMetaspaceSize=512m"
+      -e NODE_OPTIONS="--max_old_space_size=4096"
+      -w `pwd` -u `id -u`
+      ruby-node-build
+      bash -c "cd fastlane && BUNDLE_PATH=vendor/bundle bundle update && bundle install --deployment --without=development --quiet && cd .. && make build-android"
+    - mkdir $CI_PROJECT_DIR/public && mv mattermost.apk $CI_PROJECT_DIR/public
+    - docker run --rm --volumes-from="${CONTAINER}"
+      -w $CI_PROJECT_DIR
+      -u `id -u`
+      google/cloud-sdk
+      bash -c "gcloud auth activate-service-account --key-file=credentialsJson && gsutil cp public/mattermost.apk gs://bucket/mattermost-mobile/mattermost.apk"
